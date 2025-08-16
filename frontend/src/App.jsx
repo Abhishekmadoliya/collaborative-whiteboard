@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import Canvas from './components/Canvas';
 import Toolbar from './components/Toolbar';
 import useBoardStore from './store/boardStore';
+import Board from './board/Board';
 
 function App() {
   const {
@@ -28,7 +29,7 @@ function App() {
           onStrokeWidthChange={setStrokeWidth}
         />
         <div className="bg-white p-4 rounded-lg shadow-lg">
-          <Canvas />
+          <Board />
         </div>
       </div>
     </div>

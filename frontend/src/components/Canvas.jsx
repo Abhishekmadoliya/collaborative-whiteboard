@@ -1,221 +1,286 @@
-import { useEffect, useRef } from 'react';
-import useBoardStore from '../store/boardStore';
+import React, { useRef, useState, useEffect } from "react";
 
-const Canvas = () => {
+export default function Canvas() {
   const canvasRef = useRef(null);
-  const {
-    shapes,
-    currentTool,
-    currentColor,
-    strokeWidth,
-    isDrawing,
-    setIsDrawing,
-    addShape,
-    otherCursors,
-    initializeSocket
-  } = useBoardStore();
+  const ctxRef = useRef(null);
 
-  useEffect(() => {
-    initializeSocket();
-  }, []);
+  // drawing state
+  const [tool, setTool] = useState("pencil"); // pencil | rect | circle | text | eraser
+  const [brushColor, setBrushColor] = useState("#000000");
+  const [brushSize, setBrushSize] = useState(4);
+  const [fillShape, setFillShape] = useState(false);
+  const [textValue, setTextValue] = useState("Hello");
+  const [canvasSize] = useState({ width: 1000, height: 600 });
+
+  // pointer / drawing helpers
+  const isDrawingRef = useRef(false);
+  const startRef = useRef({ x: 0, y: 0 });
+  const snapshotRef = useRef(null); // ImageData for shape preview / restore
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    canvas.width = canvasSize.width;
+    canvas.height = canvasSize.height;
+    canvas.style.width = `${canvasSize.width}px`;
+    canvas.style.height = `${canvasSize.height}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctxRef.current = ctx;
 
-    // Clear and redraw all shapes
-    const redrawCanvas = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      shapes.forEach(shape => drawShape(ctx, shape));
-      
-      // Draw other users' cursors
-      Object.values(otherCursors).forEach(cursor => {
-        ctx.beginPath();
-        ctx.fillStyle = cursor.color || 'red';
-        ctx.arc(cursor.x, cursor.y, 5, 0, Math.PI * 2);
-        ctx.fill();
-      });
-    };
+    // initial background (white)
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }, [canvasSize]);
 
-    redrawCanvas();
-  }, [shapes, otherCursors]);
+  // update ctx stroke/fill when options change (used when drawing)
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    ctx.strokeStyle = brushColor;
+    ctx.fillStyle = brushColor;
+    ctx.lineWidth = brushSize;
+  }, [brushColor, brushSize]);
 
-  const drawShape = (ctx, shape) => {
-    if (!shape || !shape.type || !shape.color) return;
+  function getPointerPos(e) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
+    const y = (e.clientY ?? e.touches?.[0]?.clientY) - rect.top;
+    return { x, y };
+  }
 
-    ctx.beginPath();
-    ctx.strokeStyle = shape.color;
-    ctx.lineWidth = shape.strokeWidth || 2;
+  function handlePointerDown(e) {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    canvas.setPointerCapture?.(e.pointerId);
+    const pos = getPointerPos(e);
 
-    try {
-      switch (shape.type) {
-        case 'pencil': {
-          if (!shape.points || shape.points.length < 1) return;
-          const points = shape.points;
-          ctx.moveTo(points[0].x, points[0].y);
-          for (let i = 1; i < points.length; i++) {
-            const point = points[i];
-            if (point && typeof point.x === 'number' && typeof point.y === 'number') {
-              ctx.lineTo(point.x, point.y);
-              ctx.stroke(); // Stroke each line segment for pencil
-              ctx.beginPath();
-              ctx.moveTo(point.x, point.y);
-            }
-          }
-          break;
-        }
-        case 'rectangle': {
-          if (typeof shape.x !== 'number' || typeof shape.y !== 'number' ||
-              typeof shape.width !== 'number' || typeof shape.height !== 'number') return;
-          ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
-          break;
-        }
-        case 'circle': {
-          if (typeof shape.x !== 'number' || typeof shape.y !== 'number' ||
-              typeof shape.radius !== 'number') return;
-          ctx.arc(shape.x, shape.y, shape.radius, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        }
-        case 'line': {
-          if (typeof shape.startX !== 'number' || typeof shape.startY !== 'number' ||
-              typeof shape.endX !== 'number' || typeof shape.endY !== 'number') return;
-          ctx.moveTo(shape.startX, shape.startY);
-          ctx.lineTo(shape.endX, shape.endY);
-          ctx.stroke();
-          break;
-        }
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+
+    // pencil or eraser: begin path
+    if (tool === "pencil" || tool === "eraser") {
+      isDrawingRef.current = true;
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y);
+      if (tool === "eraser") {
+        ctx.globalCompositeOperation = "destination-out";
+      } else {
+        ctx.globalCompositeOperation = "source-over";
       }
-    } catch (error) {
-      console.error('Error drawing shape:', error);
     }
-  };
 
-  let currentShape = null;
-  let startPoint = null;
-
-  const handleMouseDown = (e) => {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    setIsDrawing(true);
-    startPoint = { x, y };
-
-    switch (currentTool) {
-      case 'pencil':
-        currentShape = {
-          type: 'pencil',
-          points: [{ x, y }],
-          color: currentColor,
-          strokeWidth
-        };
-        break;
-      case 'rectangle':
-      case 'circle':
-      case 'line':
-        currentShape = {
-          type: currentTool,
-          x,
-          y,
-          color: currentColor,
-          strokeWidth
-        };
-        break;
+    // text: place immediately
+    if (tool === "text") {
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = brushColor;
+      // adjust font size relative to brushSize
+      const fontSize = Math.max(10, brushSize * 6);
+      ctx.font = `${fontSize}px sans-serif`;
+      ctx.fillText(textValue, pos.x, pos.y);
+      ctx.restore();
     }
-  };
 
-  const handleMouseMove = (e) => {
-    if (!isDrawing || !currentShape || !startPoint) return;
+    // shapes: save a snapshot for preview and remember start point
+    if (tool === "rect" || tool === "circle") {
+      try {
+        snapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      } catch (err) {
+        // If canvas is tainted this will fail; still continue without preview
+        snapshotRef.current = null;
+      }
+      startRef.current = pos;
+      isDrawingRef.current = true;
+    }
+  }
 
+  function handlePointerMove(e) {
+    if (!isDrawingRef.current) return;
+    const pos = getPointerPos(e);
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+
+    if (tool === "pencil" || tool === "eraser") {
+      // continue line
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+      return;
+    }
+
+    if (tool === "rect") {
+      // restore snapshot for live preview
+      if (snapshotRef.current) ctx.putImageData(snapshotRef.current, 0, 0);
+      // compute rectangle coords from start to current
+      const sx = startRef.current.x;
+      const sy = startRef.current.y;
+      const w = pos.x - sx;
+      const h = pos.y - sy;
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.lineWidth = brushSize;
+      ctx.strokeStyle = brushColor;
+      ctx.fillStyle = brushColor;
+      if (fillShape) ctx.fillRect(sx, sy, w, h);
+      else ctx.strokeRect(sx, sy, w, h);
+      ctx.restore();
+      return;
+    }
+
+    if (tool === "circle") {
+      if (snapshotRef.current) ctx.putImageData(snapshotRef.current, 0, 0);
+      const sx = startRef.current.x;
+      const sy = startRef.current.y;
+      const dx = pos.x - sx;
+      const dy = pos.y - sy;
+      const radius = Math.sqrt(dx * dx + dy * dy);
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.lineWidth = brushSize;
+      ctx.strokeStyle = brushColor;
+      ctx.fillStyle = brushColor;
+      ctx.beginPath();
+      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+      ctx.closePath();
+      if (fillShape) ctx.fill();
+      else ctx.stroke();
+      ctx.restore();
+      return;
+    }
+  }
+
+  function handlePointerUp(e) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    canvas.releasePointerCapture?.(e.pointerId);
+    const ctx = ctxRef.current;
+    if (!ctx) return;
 
-    try {
-      let shouldRedraw = false;
+    if (!isDrawingRef.current) return;
+    const pos = getPointerPos(e);
 
-      switch (currentTool) {
-        case 'pencil': {
-          if (!currentShape.points) currentShape.points = [];
-          currentShape.points.push({ x, y });
-          shouldRedraw = true;
-          break;
-        }
-        case 'rectangle': {
-          const width = x - startPoint.x;
-          const height = y - startPoint.y;
-          if (currentShape.width !== width || currentShape.height !== height) {
-            currentShape.width = width;
-            currentShape.height = height;
-            shouldRedraw = true;
-          }
-          break;
-        }
-        case 'circle': {
-          const dx = x - startPoint.x;
-          const dy = y - startPoint.y;
+    if (tool === "pencil" || tool === "eraser") {
+      ctx.closePath();
+      // reset composite mode to default
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    // finalize shapes (if snapshot exists we already painted on canvas during move; if no move done, draw once)
+    if ((tool === "rect" || tool === "circle") && isDrawingRef.current) {
+      // If we never moved (very small drag), still draw small shape:
+      if (snapshotRef.current) {
+        // snapshot already restored during last move; we can just leave it as already drawn
+        snapshotRef.current = null;
+      } else {
+        // draw final from start to pos (no preview)
+        const sx = startRef.current.x;
+        const sy = startRef.current.y;
+        if (tool === "rect") {
+          const w = pos.x - sx;
+          const h = pos.y - sy;
+          if (fillShape) ctx.fillRect(sx, sy, w, h);
+          else ctx.strokeRect(sx, sy, w, h);
+        } else {
+          const dx = pos.x - sx;
+          const dy = pos.y - sy;
           const radius = Math.sqrt(dx * dx + dy * dy);
-          if (currentShape.radius !== radius) {
-            currentShape.radius = radius;
-            shouldRedraw = true;
-          }
-          break;
-        }
-        case 'line': {
-          if (currentShape.endX !== x || currentShape.endY !== y) {
-            currentShape.startX = startPoint.x;
-            currentShape.startY = startPoint.y;
-            currentShape.endX = x;
-            currentShape.endY = y;
-            shouldRedraw = true;
-          }
-          break;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+          ctx.closePath();
+          if (fillShape) ctx.fill();
+          else ctx.stroke();
         }
       }
-
-      if (shouldRedraw) {
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        if (Array.isArray(shapes)) {
-          shapes.forEach(shape => drawShape(ctx, shape));
-        }
-        drawShape(ctx, currentShape);
-      }
-    } catch (error) {
-      console.error('Error in mouse move:', error);
-      setIsDrawing(false);
-      currentShape = null;
-      startPoint = null;
     }
-  };
 
-  const handleMouseUp = () => {
-    if (!isDrawing) return;
-    setIsDrawing(false);
-    addShape(currentShape);
-    currentShape = null;
-    startPoint = null;
-  };
+    isDrawingRef.current = false;
+  }
+
+  // clear canvas (resets to white background)
+  function clearCanvas() {
+    const canvas = canvasRef.current;
+    const ctx = ctxRef.current;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function downloadCanvas() {
+    const link = document.createElement("a");
+    link.download = "drawing.png";
+    link.href = canvasRef.current.toDataURL();
+    link.click();
+  }
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={800}
-      height={600}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-      className="border border-gray-300 rounded-lg"
-    />
-  );
-};
+    <div style={{  fontFamily: "sans-serif"}} >
+      <div style={{ marginBottom: 2, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <div>
+          <button onClick={() => setTool("pencil")} style={tool === "pencil" ? selectedBtn : btn}>✏️ Pencil</button>
+          <button onClick={() => setTool("rect")} style={tool === "rect" ? selectedBtn : btn}>⬛ Rectangle</button>
+          <button onClick={() => setTool("circle")} style={tool === "circle" ? selectedBtn : btn}>⚪ Circle</button>
+          <button onClick={() => setTool("text")} style={tool === "text" ? selectedBtn : btn}>📝 Text</button>
+          <button onClick={() => setTool("eraser")} style={tool === "eraser" ? selectedBtn : btn}>🧽 Eraser</button>
+        </div>
 
-export default Canvas;
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label>Color</label>
+          <input type="color" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} />
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label>Size</label>
+          <input
+            type="range"
+            min={1}
+            max={60}
+            value={brushSize}
+            onChange={(e) => setBrushSize(Number(e.target.value))}
+          />
+          <span style={{ width: 36, textAlign: "right" }}>{brushSize}px</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label><input type="checkbox" checked={fillShape} onChange={(e) => setFillShape(e.target.checked)} /> Fill shapes</label>
+        </div>
+
+        {tool === "text" && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input value={textValue} onChange={(e) => setTextValue(e.target.value)} placeholder="Text to place" />
+            <small style={{ color: "#666" }}>Click on canvas to place text</small>
+          </div>
+        )}
+
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          <button onClick={clearCanvas} style={btn}>🗑 Clear</button>
+          <button onClick={downloadCanvas} style={btn}>⬇ Download</button>
+        </div>
+      </div>
+
+      <div style={{ border: "1px solid #ddd", display: "inline-block", width: "100%" }}>
+        <canvas
+          ref={canvasRef}
+          style={{ touchAction: "none", display: "block", background: "#fff", overflow: "hidden" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+        />
+      </div>
+    </div>
+  );
+}
+
+// simple inline button styles
+const btn = {
+  padding: "6px 10px",
+  border: "1px solid #ddd",
+  background: "#fff",
+  cursor: "pointer",
+  borderRadius: 6,
+};
+const selectedBtn = {
+  ...btn,
+  background: "#2563eb",
+  color: "#fff",
+  borderColor: "#2563eb",
+};
